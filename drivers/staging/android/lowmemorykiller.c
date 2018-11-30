@@ -49,6 +49,7 @@
 #include <linux/cpuset.h>
 #include <linux/vmpressure.h>
 #include <linux/freezer.h>
+#include <linux/adj_chain.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/almk.h>
@@ -465,11 +466,6 @@ static void mark_lmk_victim(struct task_struct *tsk)
 		set_bit(MMF_OOM_VICTIM, &mm->flags);
 	}
 }
-
-#include <linux/adj_chain.h>
-
-static bool selftest_running = false;
-static int selftest_min_score_adj = 906;
 
 static int quick_select = 1;
 module_param(quick_select, int, 0644);
@@ -1042,11 +1038,6 @@ static unsigned long lowmem_scan(struct shrinker *s, struct shrink_control *sc)
 		     sc->nr_to_scan, sc->gfp_mask, other_free,
 		     other_file, min_score_adj);
 
-	if (unlikely(selftest_running)) {
-		min_score_adj = selftest_min_score_adj;
-		goto selftest_bypass;
-	}
-
 	if (min_score_adj == OOM_SCORE_ADJ_MAX + 1) {
 		trace_almk_shrink(0, ret, other_free, other_file, 0);
 		lowmem_print(5, "lowmem_scan %lu, %x, return 0\n",
@@ -1055,7 +1046,6 @@ static unsigned long lowmem_scan(struct shrinker *s, struct shrink_control *sc)
 		return 0;
 	}
 
-selftest_bypass:
 	selected_oom_score_adj = min_score_adj;
 
 	rcu_read_lock();
@@ -1475,43 +1465,3 @@ module_param_array_named(minfree, lowmem_minfree, uint, &lowmem_minfree_size,
 			 S_IRUGO | S_IWUSR);
 module_param_named(debug_level, lowmem_debug_level, uint, S_IRUGO | S_IWUSR);
 module_param_named(lmk_fast_run, lmk_fast_run, int, S_IRUGO | S_IWUSR);
-
-static int selftest_store(const char *buf, const struct kernel_param *kp)
-{
-	unsigned int val;
-	unsigned int min_score_adj = 900;
-	long freeable;
-	struct shrink_control sc = {
-		.gfp_mask = GFP_KERNEL,
-		.nid = 0,
-		.memcg = NULL,
-	};
-
-	if (sscanf(buf, "%u %u\n", &val, &min_score_adj) <= 0)
-		return -EINVAL;
-
-	if (val < 1 || val > BATCH_KILL_MAX_CNT ||
-			min_score_adj < 352 || min_score_adj > 1000) {
-		lowmem_print(1, "selftest EINVAL\n");
-		return -EINVAL;
-	}
-
-
-	batch_kill_cnt = val;
-	selftest_min_score_adj = min_score_adj;
-	selftest_running = true;
-	freeable = lowmem_count(NULL, NULL);
-	if (freeable) {
-		lowmem_print(1, "selftest set batch kill cnt to %u, min_score_adj %d\n",
-				val, min_score_adj);
-		lowmem_scan(NULL, &sc);
-	}
-	batch_kill_cnt = 1;
-	selftest_running = false;
-	return 0;
-}
-
-static struct kernel_param_ops selftest_ops = {
-	.set = selftest_store,
-};
-module_param_cb(selftest, &selftest_ops, NULL, 0200);
