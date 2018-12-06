@@ -3358,6 +3358,9 @@ static void overload_clear(struct rq *rq)
 {
 	struct sparsemask *overload_cpus;
 
+	if (!sched_feat(STEAL))
+		return;
+
 	rcu_read_lock();
 	overload_cpus = rcu_dereference(rq->cfs_overload_cpus);
 	if (overload_cpus)
@@ -3369,12 +3372,17 @@ static void overload_set(struct rq *rq)
 {
 	struct sparsemask *overload_cpus;
 
+	if (!sched_feat(STEAL))
+		return;
+
 	rcu_read_lock();
 	overload_cpus = rcu_dereference(rq->cfs_overload_cpus);
 	if (overload_cpus)
 		sparsemask_set_elem(overload_cpus, rq->cpu);
 	rcu_read_unlock();
 }
+
+static int try_steal(struct rq *this_rq, struct pin_cookie cookie);
 
 /*
  * Optional action to be done while updating the load average
@@ -3586,6 +3594,11 @@ static inline void rq_idle_stamp_update(struct rq *rq) {}
 static inline void rq_idle_stamp_clear(struct rq *rq) {}
 static inline void overload_clear(struct rq *rq) {}
 static inline void overload_set(struct rq *rq) {}
+
+static inline int try_steal(struct rq *this_rq, struct rq_flags *rf)
+{
+	return 0;
+}
 
 #endif /* CONFIG_SMP */
 
@@ -8072,8 +8085,8 @@ idle:
 	rq_idle_stamp_update(rq);
 
 	/*
-	 * We must set idle_stamp _before_ calling idle_balance(), such that we
-	 * measure the duration of idle_balance() as idle time.
+	 * We must set idle_stamp _before_ calling try_steal() or
+	 * idle_balance(), such that we measure the duration as idle time.
 	 */
 	rq_idle_stamp_update(rq);
 
@@ -8087,13 +8100,16 @@ idle:
 	new_tasks = idle_balance(rq);
 	lockdep_repin_lock(&rq->lock, cookie);
 
+	if (new_tasks == 0)
+		new_tasks = try_steal(rq, cookie);
+
 	if (new_tasks)
 		rq_idle_stamp_clear(rq);
 
 	/*
-	 * Because idle_balance() releases (and re-acquires) rq->lock, it is
-	 * possible for any higher priority task to appear. In that case we
-	 * must re-start the pick_next_entity() loop.
+	 * Because try_steal() and idle_balance() release (and re-acquire)
+	 * rq->lock, it is possible for any higher priority task to appear.
+	 * In that case we must re-start the pick_next_entity() loop.
 	 */
 	if (new_tasks < 0)
 		return RETRY_TASK;
@@ -11154,6 +11170,152 @@ void trigger_load_balance(struct rq *rq)
 	if (nohz_kick_needed(rq, &type))
 		nohz_balancer_kick(type);
 #endif
+}
+
+/*
+ * Search the runnable tasks in @cfs_rq in order of next to run, and find
+ * the first one that can be migrated to @dst_rq.  @cfs_rq is locked on entry.
+ * On success, dequeue the task from @cfs_rq and return it, else return NULL.
+ */
+static struct task_struct *
+detach_next_task(struct cfs_rq *cfs_rq, struct rq *dst_rq)
+{
+	int dst_cpu = dst_rq->cpu;
+	struct task_struct *p;
+	struct rq *rq = rq_of(cfs_rq);
+
+	lockdep_assert_held(&rq_of(cfs_rq)->lock);
+
+	list_for_each_entry_reverse(p, &rq->cfs_tasks, se.group_node) {
+		if (can_migrate_task_llc(p, rq, dst_rq)) {
+			detach_task(p, rq, dst_cpu);
+			return p;
+		}
+	}
+	return NULL;
+}
+
+/*
+ * Attempt to migrate a CFS task from @src_cpu to @dst_rq.  @locked indicates
+ * whether @dst_rq is already locked on entry.  This function may lock or
+ * unlock @dst_rq, and updates @locked to indicate the locked state on return.
+ * The locking protocol is based on idle_balance().
+ * Returns 1 on success and 0 on failure.
+ */
+static int steal_from(struct rq *dst_rq, struct pin_cookie *cookie, bool *locked,
+		      int src_cpu)
+{
+	struct task_struct *p;
+	struct rq_flags rf;
+	int stolen = 0;
+	int dst_cpu = dst_rq->cpu;
+	struct rq *src_rq = cpu_rq(src_cpu);
+
+	if (dst_cpu == src_cpu || src_rq->cfs.h_nr_running < 2)
+		return 0;
+
+	if (*locked) {
+		lockdep_unpin_lock(&dst_rq->lock, *cookie);
+		raw_spin_unlock(&dst_rq->lock);
+		*locked = false;
+	}
+	raw_spin_lock_irqsave(&src_rq->lock, rf.flags);
+	*cookie = lockdep_pin_lock(&src_rq->lock);
+	update_rq_clock(src_rq);
+
+	if (src_rq->cfs.h_nr_running < 2 || !cpu_active(src_cpu))
+		p = NULL;
+	else
+		p = detach_next_task(&src_rq->cfs, dst_rq);
+
+	lockdep_unpin_lock(&src_rq->lock, *cookie);
+	raw_spin_unlock(&src_rq->lock);
+
+	if (p) {
+		raw_spin_lock(&dst_rq->lock);
+		lockdep_repin_lock(&dst_rq->lock, *cookie);
+		*locked = true;
+		update_rq_clock(dst_rq);
+		attach_task(dst_rq, p);
+		stolen = 1;
+	}
+	local_irq_restore(rf.flags);
+
+	return stolen;
+}
+
+/*
+ * Conservative upper bound on the max cost of a steal, in nsecs (the typical
+ * cost is 1-2 microsec).  Do not steal if average idle time is less.
+ */
+#define SCHED_STEAL_COST 10000
+
+/*
+ * Try to steal a runnable CFS task from a CPU in the same LLC as @dst_rq,
+ * and migrate it to @dst_rq.  rq_lock is held on entry and return, but
+ * may be dropped in between.  Return 1 on success, 0 on failure, and -1
+ * if a task in a different scheduling class has become runnable on @dst_rq.
+ */
+static int try_steal(struct rq *dst_rq, struct pin_cookie cookie)
+{
+	int src_cpu;
+	int dst_cpu = dst_rq->cpu;
+	bool locked = true;
+	int stolen = 0;
+	struct sparsemask *overload_cpus;
+
+	if (!sched_feat(STEAL))
+		return 0;
+
+	if (!cpu_active(dst_cpu))
+		return 0;
+
+	if (dst_rq->avg_idle < SCHED_STEAL_COST)
+		return 0;
+
+	/* Get bitmap of overloaded CPUs in the same LLC as @dst_rq */
+
+	rcu_read_lock();
+	overload_cpus = rcu_dereference(dst_rq->cfs_overload_cpus);
+	if (!overload_cpus) {
+		rcu_read_unlock();
+		return 0;
+	}
+
+#ifdef CONFIG_SCHED_SMT
+	/*
+	 * First try overloaded CPUs on the same core to preserve cache warmth.
+	 */
+	if (static_branch_likely(&sched_smt_present)) {
+		for_each_cpu(src_cpu, cpu_smt_mask(dst_cpu)) {
+			if (sparsemask_test_elem(overload_cpus, src_cpu) &&
+			    steal_from(dst_rq, &cookie, &locked, src_cpu)) {
+				stolen = 1;
+				goto out;
+			}
+		}
+	}
+#endif	/* CONFIG_SCHED_SMT */
+
+	/* Accept any suitable task in the LLC */
+
+	sparsemask_for_each(overload_cpus, dst_cpu, src_cpu) {
+		if (steal_from(dst_rq, &cookie, &locked, src_cpu)) {
+			stolen = 1;
+			goto out;
+		}
+	}
+
+out:
+	rcu_read_unlock();
+	if (!locked) {
+		raw_spin_lock(&dst_rq->lock);
+		lockdep_repin_lock(&dst_rq->lock, cookie);
+	}
+	stolen |= (dst_rq->cfs.h_nr_running > 0);
+	if (dst_rq->nr_running != dst_rq->cfs.h_nr_running)
+		stolen = -1;
+	return stolen;
 }
 
 static void rq_online_fair(struct rq *rq)

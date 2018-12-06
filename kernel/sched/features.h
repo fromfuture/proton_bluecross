@@ -116,3 +116,9 @@ SCHED_FEAT(EAS_USE_NEED_IDLE, false)
  * RT class.
  */
 SCHED_FEAT(SCHEDTUNE_BOOST_HOLD_ALL, true)
+
+/*
+ * Steal a CFS task from another CPU when going idle.
+ * Improves CPU utilization.
+ */
+SCHED_FEAT(STEAL, true)
