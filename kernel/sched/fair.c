@@ -33,6 +33,7 @@
 #include <linux/module.h>
 
 #include "sched.h"
+#include "sparsemask.h"
 #include "tune.h"
 #include "walt.h"
 #include <trace/events/sched.h>
@@ -3343,6 +3344,28 @@ update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq, bool update_freq)
 	return decayed || removed_load;
 }
 
+static void overload_clear(struct rq *rq)
+{
+	struct sparsemask *overload_cpus;
+
+	rcu_read_lock();
+	overload_cpus = rcu_dereference(rq->cfs_overload_cpus);
+	if (overload_cpus)
+		sparsemask_clear_elem(overload_cpus, rq->cpu);
+	rcu_read_unlock();
+}
+
+static void overload_set(struct rq *rq)
+{
+	struct sparsemask *overload_cpus;
+
+	rcu_read_lock();
+	overload_cpus = rcu_dereference(rq->cfs_overload_cpus);
+	if (overload_cpus)
+		sparsemask_set_elem(overload_cpus, rq->cpu);
+	rcu_read_unlock();
+}
+
 /*
  * Optional action to be done while updating the load average
  */
@@ -3548,6 +3571,9 @@ static inline int idle_balance(struct rq *rq)
 {
 	return 0;
 }
+
+static inline void overload_clear(struct rq *rq) {}
+static inline void overload_set(struct rq *rq) {}
 
 #endif /* CONFIG_SMP */
 
@@ -4234,6 +4260,7 @@ static int tg_throttle_down(struct task_group *tg, void *data)
 static void throttle_cfs_rq(struct cfs_rq *cfs_rq)
 {
 	struct rq *rq = rq_of(cfs_rq);
+	unsigned int prev_nr = rq->cfs.h_nr_running;
 	struct cfs_bandwidth *cfs_b = tg_cfs_bandwidth(cfs_rq->tg);
 	struct sched_entity *se;
 	long task_delta, dequeue = 1;
@@ -4265,6 +4292,8 @@ static void throttle_cfs_rq(struct cfs_rq *cfs_rq)
 	if (!se) {
 		sub_nr_running(rq, task_delta);
 		walt_dec_throttled_cfs_rq_stats(&rq->walt_stats, cfs_rq);
+		if (prev_nr >= 2 && prev_nr - task_delta < 2)
+			overload_clear(rq);
 	}
 
 	cfs_rq->throttled = 1;
@@ -4295,6 +4324,7 @@ static void throttle_cfs_rq(struct cfs_rq *cfs_rq)
 void unthrottle_cfs_rq(struct cfs_rq *cfs_rq)
 {
 	struct rq *rq = rq_of(cfs_rq);
+	unsigned int prev_nr = rq->cfs.h_nr_running;
 	struct cfs_bandwidth *cfs_b = tg_cfs_bandwidth(cfs_rq->tg);
 	struct sched_entity *se;
 	int enqueue = 1;
@@ -4336,6 +4366,8 @@ void unthrottle_cfs_rq(struct cfs_rq *cfs_rq)
 	if (!se) {
 		add_nr_running(rq, task_delta);
 		walt_inc_throttled_cfs_rq_stats(&rq->walt_stats, tcfs_rq);
+		if (prev_nr < 2 && prev_nr + task_delta >= 2)
+			overload_set(rq);
 	}
 
 	/* determine whether we need to wake up potentially idle cpu */
@@ -4862,6 +4894,7 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 {
 	struct cfs_rq *cfs_rq;
 	struct sched_entity *se = &p->se;
+	unsigned int prev_nr = rq->cfs.h_nr_running;
 #ifdef CONFIG_SMP
 	int task_new = flags & ENQUEUE_WAKEUP_NEW;
 
@@ -4935,6 +4968,9 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 			rq->nr_pinned_tasks++;
 
 		inc_rq_walt_stats(rq, p);
+
+		if (prev_nr == 1)
+			overload_set(rq);
 	}
 
 #ifdef CONFIG_SMP
@@ -4962,6 +4998,7 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	struct cfs_rq *cfs_rq;
 	struct sched_entity *se = &p->se;
 	int task_sleep = flags & DEQUEUE_SLEEP;
+	unsigned int prev_nr = rq->cfs.h_nr_running;
 
 #ifdef CONFIG_SMP
 	/*
@@ -5023,6 +5060,8 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 			rq->nr_pinned_tasks--;
 
 		dec_rq_walt_stats(rq, p);
+		if (prev_nr == 2)
+			overload_clear(rq);
 	}
 
 #ifdef CONFIG_SMP
