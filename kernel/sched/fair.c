@@ -3344,6 +3344,16 @@ update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq, bool update_freq)
 	return decayed || removed_load;
 }
 
+static inline void rq_idle_stamp_update(struct rq *rq)
+{
+	rq->idle_stamp = rq_clock(rq);
+}
+
+static inline void rq_idle_stamp_clear(struct rq *rq)
+{
+	rq->idle_stamp = 0;
+}
+
 static void overload_clear(struct rq *rq)
 {
 	struct sparsemask *overload_cpus;
@@ -3572,6 +3582,8 @@ static inline int idle_balance(struct rq *rq)
 	return 0;
 }
 
+static inline void rq_idle_stamp_update(struct rq *rq) {}
+static inline void rq_idle_stamp_clear(struct rq *rq) {}
 static inline void overload_clear(struct rq *rq) {}
 static inline void overload_set(struct rq *rq) {}
 
@@ -8052,6 +8064,13 @@ done: __maybe_unused
 
 idle:
 	rq->misfit_task = 0;
+
+	/*
+	 * We must set idle_stamp _before_ calling idle_balance(), such that we
+	 * measure the duration of idle_balance() as idle time.
+	 */
+	rq_idle_stamp_update(rq);
+
 	/*
 	 * This is OK, because current is on_cpu, which avoids it being picked
 	 * for load-balance and preemption/IRQs are still disabled avoiding
@@ -8061,6 +8080,10 @@ idle:
 	lockdep_unpin_lock(&rq->lock, cookie);
 	new_tasks = idle_balance(rq);
 	lockdep_repin_lock(&rq->lock, cookie);
+
+	if (new_tasks)
+		rq_idle_stamp_clear(rq);
+
 	/*
 	 * Because idle_balance() releases (and re-acquires) rq->lock, it is
 	 * possible for any higher priority task to appear. In that case we
@@ -10409,12 +10432,6 @@ static int idle_balance(struct rq *this_rq)
 	if (cpu_isolated(this_cpu))
 		return 0;
 
-	/*
-	 * We must set idle_stamp _before_ calling idle_balance(), such that we
-	 * measure the duration of idle_balance() as idle time.
-	 */
-	this_rq->idle_stamp = rq_clock(this_rq);
-
 	if (!energy_aware() &&
 	    (this_rq->avg_idle < sysctl_sched_migration_cost ||
 	     !this_rq->rd->overload)) {
@@ -10492,9 +10509,6 @@ out:
 	/* Is there a task of a high priority class? */
 	if (this_rq->nr_running != this_rq->cfs.h_nr_running)
 		pulled_task = -1;
-
-	if (pulled_task)
-		this_rq->idle_stamp = 0;
 
 	return pulled_task;
 }
