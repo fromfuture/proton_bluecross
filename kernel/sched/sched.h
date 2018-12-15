@@ -2565,11 +2565,6 @@ static inline unsigned int task_pl(struct task_struct *p)
 #define real_to_pct(tunable)	\
 		(div64_u64((u64)tunable * (u64)100, (u64)max_task_load()))
 
-static inline bool task_in_related_thread_group(struct task_struct *p)
-{
-	return !!(rcu_access_pointer(p->grp) != NULL);
-}
-
 static inline
 struct related_thread_group *task_related_thread_group(struct task_struct *p)
 {
@@ -2735,11 +2730,6 @@ static inline int cpu_capacity(int cpu)
 }
 
 static inline void set_preferred_cluster(struct related_thread_group *grp) { }
-
-static inline bool task_in_related_thread_group(struct task_struct *p)
-{
-	return false;
-}
 
 static inline
 struct related_thread_group *task_related_thread_group(struct task_struct *p)
