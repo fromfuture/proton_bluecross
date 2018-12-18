@@ -32,8 +32,7 @@ crct10dif-ce-y := crct10dif-ce-core.o crct10dif-ce-glue.o
 obj-$(CONFIG_CRYPTO_CRC32_ARM64_CE) += crc32-ce.o
 crc32-ce-y:= crc32-ce-core.o crc32-ce-glue.o
 
-obj-$(CONFIG_CRYPTO_AES_ARM64_CE) += aes-ce-cipher.o
-aes-ce-cipher-y := aes-ce-cipher-glue.o aes-ce-cipher-core.o
+obj-$(CONFIG_CRYPTO_AES_ARM64_CE) += aes-ce-cipher.o aes-ce-cipher-core.o
 CFLAGS_aes-ce-cipher-core.o += -march=armv8.2-a+crypto -Wa,-march=armv8.2-a+crypto $(DISABLE_LTO)
 ifeq ($(cc-name),gcc)
 CFLAGS_aes-ce-cipher-core.o += -mcpu=cortex-a75.cortex-a55 -mtune=cortex-a75.cortex-a55
