@@ -4056,6 +4056,26 @@ int do_stune_boost(char *st_name, int boost);
 int do_stune_sched_boost(char *st_name);
 int reset_stune_boost(char *st_name);
 int modify_stune_boost(char *st_name, int boost);
+#else /* !CONFIG_DYNAMIC_STUNE_BOOST */
+static inline int do_stune_boost(char *st_name, int boost)
+{
+	return 0;
+}
+
+static inline int do_stune_sched_boost(char *st_name)
+{
+	return 0;
+}
+
+static inline int reset_stune_boost(char *st_name)
+{
+	return 0;
+}
+
+static inline int modify_stune_boost(char *st_name, int boost)
+{
+	return 0;
+}
 #endif /* CONFIG_DYNAMIC_STUNE_BOOST */
 
 extern DEFINE_PER_CPU_READ_MOSTLY(int, sched_load_boost);
