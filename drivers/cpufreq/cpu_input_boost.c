@@ -30,6 +30,18 @@ module_param(general_boost_freq_lp, uint, 0644);
 module_param(general_boost_freq_hp, uint, 0644);
 module_param(input_boost_duration, short, 0644);
 
+#ifdef CONFIG_DYNAMIC_STUNE_BOOST
+static __read_mostly int input_stune_boost = CONFIG_INPUT_BOOST_STUNE_LEVEL;
+/* For compatibility purposes */
+module_param_named(dynamic_stune_boost, input_stune_boost, int, 0644);
+
+static __read_mostly int max_stune_boost = CONFIG_MAX_BOOST_STUNE_LEVEL;
+module_param(max_stune_boost, int, 0644);
+
+static __read_mostly int general_stune_boost = CONFIG_GENERAL_BOOST_STUNE_LEVEL;
+module_param(general_stune_boost, int, 0644);
+#endif
+
 /* Available bits for boost_drv state */
 #define SCREEN_AWAKE		BIT(0)
 #define INPUT_BOOST		BIT(1)
@@ -51,6 +63,7 @@ struct boost_drv {
 	atomic64_t general_boost_expires;
 	atomic_t general_boost_dur;
 	atomic_t state;
+	int current_stune_boost;
 };
 
 static struct boost_drv *boost_drv_g __read_mostly;
@@ -102,6 +115,27 @@ static void update_online_cpu_policy(void)
 	for_each_online_cpu(cpu)
 		cpufreq_update_policy(cpu);
 	put_online_cpus();
+}
+
+static void update_stune_boost(struct boost_drv *b, int level)
+{
+	if (level && b->current_stune_boost != level) {
+		if (b->current_stune_boost) {
+			if (!modify_stune_boost("top-app", level))
+				b->current_stune_boost = level;
+		} else {
+			if (!do_stune_boost("top-app", level))
+				b->current_stune_boost = level;
+		}
+	}
+}
+
+static void clear_stune_boost(struct boost_drv *b)
+{
+	if (b->current_stune_boost) {
+		reset_stune_boost("top-app");
+		b->current_stune_boost = 0;
+	}
 }
 
 static void unboost_all_cpus(struct boost_drv *b)
@@ -265,6 +299,16 @@ static int cpu_notifier_cb(struct notifier_block *nb,
 		return NOTIFY_OK;
 
 	state = get_boost_state(b);
+
+	/* Handle stune boost states */
+	if (state & MAX_BOOST)
+		update_stune_boost(b, max_stune_boost);
+	else if (state & INPUT_BOOST)
+		update_stune_boost(b, input_stune_boost);
+	else if (state & GENERAL_BOOST)
+		update_stune_boost(b, general_stune_boost);
+	else
+		clear_stune_boost(b);
 
 	/* Boost CPU to max frequency for max boost */
 	if (state & MAX_BOOST) {
