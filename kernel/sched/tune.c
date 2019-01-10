@@ -1222,6 +1222,21 @@ int do_stune_boost(char *st_name, int boost)
 	return _do_stune_boost(st, boost);
 }
 
+int modify_stune_boost(char *st_name, int boost)
+{
+	struct schedtune *st = getSchedtune(st_name);
+	int ret;
+
+	if (!st)
+		return -EINVAL;
+	
+	mutex_lock(&stune_boost_mutex);
+	ret = boost_write(&st->css, NULL, boost);
+	mutex_unlock(&stune_boost_mutex);
+
+	return ret;
+}
+
 #endif /* CONFIG_DYNAMIC_STUNE_BOOST */
 
 #else /* CONFIG_CGROUP_SCHEDTUNE */
