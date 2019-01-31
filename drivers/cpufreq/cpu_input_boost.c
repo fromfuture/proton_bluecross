@@ -26,7 +26,10 @@ static __read_mostly unsigned int input_boost_return_freq_lp = CONFIG_REMOVE_INP
 static __read_mostly unsigned int input_boost_return_freq_hp = CONFIG_REMOVE_INPUT_BOOST_FREQ_PERF;
 static __read_mostly unsigned int general_boost_freq_lp = CONFIG_GENERAL_BOOST_FREQ_LP;
 static __read_mostly unsigned int general_boost_freq_hp = CONFIG_GENERAL_BOOST_FREQ_PERF;
+static __read_mostly unsigned int tap_boost_freq_lp = CONFIG_TAP_BOOST_FREQ_LP;
+static __read_mostly unsigned int tap_boost_freq_hp = CONFIG_TAP_BOOST_FREQ_PERF;
 static __read_mostly unsigned short input_boost_duration = CONFIG_INPUT_BOOST_DURATION_MS;
+static __read_mostly unsigned short tap_boost_duration = CONFIG_TAP_BOOST_DURATION_MS;
 
 module_param(input_boost_freq_lp, uint, 0644);
 module_param(input_boost_freq_hp, uint, 0644);
@@ -34,12 +37,16 @@ module_param_named(remove_input_boost_freq_lp, input_boost_return_freq_lp, uint,
 module_param_named(remove_input_boost_freq_perf, input_boost_return_freq_hp, uint, 0644);
 module_param(general_boost_freq_lp, uint, 0644);
 module_param(general_boost_freq_hp, uint, 0644);
+module_param(tap_boost_freq_lp, uint, 0644);
+module_param(tap_boost_freq_hp, uint, 0644);
 module_param(input_boost_duration, short, 0644);
+module_param(tap_boost_duration, short, 0644);
 
 #ifdef CONFIG_DYNAMIC_STUNE_BOOST
 static __read_mostly int input_stune_boost = CONFIG_INPUT_BOOST_STUNE_LEVEL;
 static __read_mostly int max_stune_boost = CONFIG_MAX_BOOST_STUNE_LEVEL;
 static __read_mostly int general_stune_boost = CONFIG_GENERAL_BOOST_STUNE_LEVEL;
+static __read_mostly int tap_stune_boost = CONFIG_TAP_BOOST_STUNE_LEVEL;
 static __read_mostly int display_stune_boost = CONFIG_DISPLAY_BOOST_STUNE_LEVEL;
 static __read_mostly int display_bg_stune_boost = CONFIG_BG_DISPLAY_BOOST_STUNE_LEVEL;
 static __read_mostly int suspend_ta_stune_boost = CONFIG_SUSPEND_BOOST_STUNE_LEVEL;
@@ -50,6 +57,7 @@ static __read_mostly int suspend_root_stune_boost = CONFIG_ROOT_SUSPEND_BOOST_ST
 module_param_named(dynamic_stune_boost, input_stune_boost, int, 0644);
 module_param(max_stune_boost, int, 0644);
 module_param(general_stune_boost, int, 0644);
+module_param(tap_stune_boost, int, 0644);
 module_param(display_stune_boost, int, 0644);
 module_param(display_bg_stune_boost, int, 0644);
 module_param(suspend_ta_stune_boost, int, 0644);
@@ -63,11 +71,13 @@ module_param(suspend_root_stune_boost, int, 0644);
 #define INPUT_BOOST		BIT(1)
 #define MAX_BOOST		BIT(2)
 #define GENERAL_BOOST		BIT(3)
-#define INPUT_STUNE_BOOST	BIT(4)
-#define MAX_STUNE_BOOST		BIT(5)
-#define GENERAL_STUNE_BOOST	BIT(6)
-#define DISPLAY_STUNE_BOOST	BIT(7)
-#define DISPLAY_BG_STUNE_BOOST	BIT(8)
+#define TAP_BOOST		BIT(4)
+#define INPUT_STUNE_BOOST	BIT(5)
+#define MAX_STUNE_BOOST		BIT(6)
+#define GENERAL_STUNE_BOOST	BIT(7)
+#define TAP_STUNE_BOOST		BIT(8)
+#define DISPLAY_STUNE_BOOST	BIT(9)
+#define DISPLAY_BG_STUNE_BOOST	BIT(10)
 
 struct boost_drv {
 	struct kthread_worker worker;
@@ -78,6 +88,8 @@ struct boost_drv {
 	struct delayed_work max_unboost;
 	struct kthread_work general_boost;
 	struct delayed_work general_unboost;
+	struct kthread_work tap_boost;
+	struct delayed_work tap_unboost;
 	struct notifier_block cpu_notif;
 	struct notifier_block msm_drm_notif;
 	atomic64_t max_boost_expires;
@@ -88,6 +100,7 @@ struct boost_drv {
 	int input_stune_slot;
 	int max_stune_slot;
 	int general_stune_slot;
+	int tap_stune_slot;
 	int display_stune_slot;
 	int display_bg_stune_slot;
 	int ta_stune_boost_default;
@@ -101,7 +114,12 @@ static struct boost_drv *boost_drv_g __read_mostly;
 
 static u32 get_boost_freq(struct boost_drv *b, u32 cpu, u32 state)
 {
-	if (state & INPUT_BOOST) {
+	if (state & TAP_BOOST) {
+		if (cpumask_test_cpu(cpu, cpu_lp_mask))
+			return tap_boost_freq_lp;
+
+		return tap_boost_freq_hp;
+	} else if (state & INPUT_BOOST) {
 		if (cpumask_test_cpu(cpu, cpu_lp_mask))
 			return input_boost_freq_lp;
 
@@ -174,12 +192,13 @@ static void unboost_all_cpus(struct boost_drv *b)
 		!cancel_delayed_work_sync(&b->max_unboost))
 		return;
 
-	clear_boost_bit(b, INPUT_BOOST | MAX_BOOST | GENERAL_BOOST);
+	clear_boost_bit(b, INPUT_BOOST | MAX_BOOST | GENERAL_BOOST | TAP_BOOST);
 	update_online_cpu_policy();
 
 	clear_stune_boost(b, state, INPUT_STUNE_BOOST, ST_TA, b->input_stune_slot);
 	clear_stune_boost(b, state, MAX_STUNE_BOOST, ST_TA, b->max_stune_slot);
 	clear_stune_boost(b, state, GENERAL_STUNE_BOOST, ST_TA, b->general_stune_slot);
+	clear_stune_boost(b, state, TAP_STUNE_BOOST, ST_TA, b->tap_stune_slot);
 }
 
 void cpu_input_boost_kick(void)
@@ -254,6 +273,16 @@ void cpu_input_boost_kick_general(unsigned int duration_ms)
 		return;
 
 	__cpu_input_boost_kick_general(b, duration_ms);
+}
+
+void cpu_input_boost_kick_tap(void)
+{
+	struct boost_drv *b = boost_drv_g;
+
+	if (!b)
+		return;
+
+	kthread_queue_work(&b->worker, &b->tap_boost);
 }
 
 static void input_boost_worker(struct kthread_work *work)
@@ -343,6 +372,35 @@ static void general_unboost_worker(struct work_struct *work)
 	clear_stune_boost(b, state, GENERAL_STUNE_BOOST, ST_TA, b->general_stune_slot);
 }
 
+static void tap_boost_worker(struct kthread_work *work)
+{
+	struct boost_drv *b = container_of(work, typeof(*b), tap_boost);
+	u32 state = get_boost_state(b);
+
+	if (!cancel_delayed_work_sync(&b->tap_unboost)) {
+		set_boost_bit(b, TAP_BOOST);
+		update_online_cpu_policy();
+	}
+
+	queue_delayed_work(system_power_efficient_wq, &b->tap_unboost,
+		msecs_to_jiffies(tap_boost_duration));
+
+	update_stune_boost(b, state, TAP_STUNE_BOOST, ST_TA, tap_stune_boost,
+		&b->tap_stune_slot);
+}
+
+static void tap_unboost_worker(struct work_struct *work)
+{
+	struct boost_drv *b = container_of(to_delayed_work(work),
+					   typeof(*b), tap_unboost);
+	u32 state = get_boost_state(b);
+
+	clear_boost_bit(b, TAP_BOOST);
+	update_online_cpu_policy();
+
+	clear_stune_boost(b, state, TAP_STUNE_BOOST, ST_TA, b->tap_stune_slot);
+}
+
 static int cpu_notifier_cb(struct notifier_block *nb,
 			   unsigned long action, void *data)
 {
@@ -365,7 +423,7 @@ static int cpu_notifier_cb(struct notifier_block *nb,
 	 * Boost to policy->max if the boost frequency is higher. When
 	 * unboosting, set policy->min to the absolute min freq for the CPU.
 	 */
-	if (state & INPUT_BOOST || state & GENERAL_BOOST) {
+	if (state & INPUT_BOOST || state & GENERAL_BOOST || state & TAP_BOOST) {
 		boost_freq = get_boost_freq(b, policy->cpu, state);
 		policy->min = min(policy->max, boost_freq);
 	} else {
@@ -445,8 +503,10 @@ static void cpu_input_boost_input_event(struct input_handle *handle,
 	if (!(state & SCREEN_AWAKE))
 		return;
 
-	kthread_queue_work(&b->worker, &b->input_boost);
+	if (type == EV_KEY && code == BTN_TOUCH && value == 1)
+		kthread_queue_work(&b->worker, &b->tap_boost);
 
+	kthread_queue_work(&b->worker, &b->input_boost);
 	last_input_jiffies = jiffies;
 }
 
@@ -564,6 +624,8 @@ static int __init cpu_input_boost_init(void)
 	INIT_DELAYED_WORK(&b->max_unboost, max_unboost_worker);
 	kthread_init_work(&b->general_boost, general_boost_worker);
 	INIT_DELAYED_WORK(&b->general_unboost, general_unboost_worker);
+	kthread_init_work(&b->tap_boost, tap_boost_worker);
+	INIT_DELAYED_WORK(&b->tap_unboost, tap_unboost_worker);
 	atomic_set(&b->state, 0);
 	b->ta_stune_boost_default = INT_MIN;
 	b->fg_stune_boost_default = INT_MIN;

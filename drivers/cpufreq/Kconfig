@@ -421,6 +421,40 @@ config MAX_BOOST_STUNE_LEVEL
 	  accepted for testing purposes. A value of 0 disables SchedTune
 	  boosting for this level.
 
+config TAP_BOOST_DURATION_MS
+	int "Tap boost duration"
+	default "32"
+	help
+	  Tap boost duration in milliseconds. Tap boost is a high-performance
+	  tap boost that activates when a finger is placed on the screen. It is
+	  meant to be short but aggressive to improve responsiveness of buttons
+	  and similar UI elements without sacrificing a significant amount of
+	  performance.
+
+config TAP_BOOST_FREQ_LP
+	int "Low-power cluster tap boost freq"
+	default "0"
+	help
+	  Tap boost frequency for the low-power CPU cluster.
+
+config TAP_BOOST_FREQ_PERF
+	int "Performance cluster tap boost freq"
+	default "0"
+	help
+	  Tap boost frequency for the performance CPU cluster.
+
+config TAP_BOOST_STUNE_LEVEL
+	int "Foreground app schedtune tap boost level"
+	depends on DYNAMIC_STUNE_BOOST
+	default "35"
+	help
+	  Tap boost level for the EAS SchedTune boosting system. This
+	  artifically increases perceived load of certain processes in order
+	  to prioritize and increase their usage of big cores as well as
+	  influence system-wide CPU frequency selection. Negative values are
+	  accepted for testing purposes. A value of 0 disables SchedTune
+	  boosting for this level.
+
 config DISPLAY_BOOST_STUNE_LEVEL
 	int "Foreground app schedtune screen-on boost level"
 	depends on DYNAMIC_STUNE_BOOST
